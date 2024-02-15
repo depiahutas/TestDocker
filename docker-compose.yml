@@ -1,0 +1,21 @@
+version: "3"
+services:
+  employee-jdbc:
+    image: image-api
+    ports:
+      - "8089:8089"
+    networks:
+      - apidb
+    depends_on:
+      - mysqldb
+
+  mysqldb:
+    image: mysql:8
+    networks:
+      - apidb
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=apidb
+
+networks:
+  apidb:

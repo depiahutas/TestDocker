@@ -1,0 +1,171 @@
+# This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-maven
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Java CI with Maven
+
+on:
+  push:
+    branches: [master]
+    paths:
+      # pour eviter de reconstruire si on modifie un fichier autre que dans src
+      - 'src/**'
+      - '.github/workflows/maven.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'infra/mysql/dump/**'
+      - '.github/workflows/maven.yml'
+    types: [opened, synchronize, reopened]
+
+jobs:
+  #Jobs 1
+  init-workflow:
+    name: init workflow
+    runs-on: ubuntu-latest  #os
+    steps:
+      # message informatif
+      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
+      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub!"
+      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+
+  #Jobs 2
+  project-build:
+    name: Construct JAR
+    runs-on: ubuntu-latest  #os
+    needs: # Nécessite qu'init workflow soit fini. Cohérence
+      - init-workflow
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+
+      - name: Start MySQL
+        run : sudo service mysql start
+
+      - name: Create Database from script # -u = user   -p = password   -e Le chemin d'accès
+        run: mysql -u${{ secrets.DB_USER }} -p${{ secrets.DB_PASSWORD }} -e "source infra/mysql/dump/partagerecette.sql"
+
+      - name: Install Chrome Browser for selenium
+        uses: browser-actions/setup-chrome@latest
+
+      - name: run Chrome Browser for version control # Optionnel mais toujours bon à prendre
+        run: chrome --version
+
+      - name: Set up JDK 17
+        # v4 node.js runtime v20
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          architecture: x64
+
+      - name: Cache SonarCloud packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Build jar and analyze SonarCloud
+        env:
+         # GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Needed to get PR information, if any
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.projectKey=Lebossais_Project1-Api
+
+      # permet de charger un artefact
+      - name: Charging artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact
+          path: target/*.jar
+          retention-days: 1 # Nombre de jour où le fichier reste disponible en mémoire
+
+      # message de fin indiquant que tout s'est bien passé
+      - run: echo "🍏 This job's status is ${{ job.status }}."
+
+  #Jobs 3
+  docker-build-image-api:
+    # vérifie que le déclenchement provient de la branche main
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    needs: # Nécessite que project-build soit fini. Cohérence
+      - project-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Up QEMU # Language technique de Docker pour qu'il fonctionne
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set Up Docker Build
+        uses: docker/setup-buildx-action@v3
+
+      - name: Connect to Docker Hub
+        uses: docker/login-action@v3
+        with: # Settings > Secrets and variables > Actions > Repository Secrets
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Download a single artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: artifact # Nom du fichier avec le .zip
+
+      # juste pour le contrôle
+      - name: List files in the repository
+        run: ls ${{ github.workspace }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USER }}/apimage:latest
+
+      # message de fin indiquant que tout s'est bien passé
+      - run: echo "🍏 This job's status is ${{ job.status }}."
+
+  #Jobs 4
+  build-and-push-container:
+    # vérifie que le déclenchement provient de la branche main
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    needs: # Nécessite que docker-build-image-api soit fini. Cohérence
+      - docker-build-image-api
+    steps:
+      - name : Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set Up Docker Build
+        uses: docker/setup-buildx-action@v3
+
+      - name: Connect to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Build and Push Docker image from Docker Compose
+        run: |
+          docker-compose -f docker-compose.yml build
+          docker-compose -f docker-compose.yml push
+
+      # message de fin indiquant que tout s'est bien passé en logs
+      - run: echo "🍏 This job's status is ${{ job.status }}."
