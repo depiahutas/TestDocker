@@ -1,7 +1,7 @@
 version: "3"
 services:
   employee-jdbc:
-    image: image-api
+    image: mysqlapi
     ports:
       - "8089:8089"
     networks:
